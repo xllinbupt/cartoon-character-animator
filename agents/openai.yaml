@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cartoon Character Animator"
+  short_description: "Generate consistent cartoon animation assets from photos"
+  default_prompt: "Use $cartoon-character-animator to create consistent cartoon character animation assets from my reference photos and requested actions."

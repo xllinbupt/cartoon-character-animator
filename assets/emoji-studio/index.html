@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#fff9ef"><title>表情工坊</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><a class="brand" href="/"><span class="brand-face" aria-hidden="true"><i></i></span>表情工坊</a><div id="connection" class="pill">连接中</div></header>
+<main>
+<section class="intro"><h1>制作表情</h1><p>上传角色，编辑表情，下载一整包。</p></section>
+<div class="workspace">
+<section class="composer" aria-label="制作表情包">
+<div class="card character-card">
+<div class="section-head"><h2><b>1</b> 选一个角色</h2><button id="sample" class="text-btn" type="button">用示例角色</button></div>
+<div class="character-content">
+<div class="character-image"><label id="drop" class="upload"><input id="upload" type="file" aria-label="上传角色图片" accept="image/png,image/jpeg,image/webp"><div id="upload-placeholder"><div class="upload-face" aria-hidden="true"><i></i><em>＋</em></div><strong>上传角色图片</strong><small>或把图片拖到这里</small></div><img id="reference" alt="已上传角色" hidden></label><div id="filename" class="muted">PNG / JPG / WebP · 最大 8 MB</div></div>
+<label class="field">保留哪些特征？ <span>选填</span><textarea id="identity" rows="4" maxlength="500" placeholder="比如：黄色身体、深蓝色耳朵、大眼睛，保留原来的衣服和道具。"></textarea></label>
+</div>
+</div>
+<div class="card expression-card">
+<div class="section-head"><h2><b>2</b> 编辑表情</h2><span class="count" id="count">0 / 10</span></div>
+<div class="mode" role="group" aria-label="表情类型"><button id="animated" class="selected" type="button">动态表情 <small>12 帧</small></button><button id="static" type="button">静态表情 <small>1 张</small></button></div>
+<div class="presets" id="presets" aria-label="定位或添加常用表情"></div>
+<div id="expressions" aria-label="编辑表情名称和动作"></div>
+<button id="add" class="add" type="button">＋ 添加自定义表情</button>
+<label class="check"><input id="outline" type="checkbox"><span>加白色描边 <small>适合深色聊天背景</small></span></label>
+</div>
+<div class="submit-card"><div><strong id="budget">10 个表情 · 1 次生图</strong><small id="budget-detail">12 帧 / 表情 · 不自动重试</small></div><button id="generate" class="primary" type="button" disabled>生成表情包</button></div>
+<p class="fine">点击生成会调用生图接口。表情名称用于文件命名，默认不画进图片。</p><div id="error" class="error" role="alert" hidden></div>
+</section>
+<section class="results" aria-label="表情预览和下载">
+<div class="section-head"><h2><b>3</b> 表情预览</h2><button id="refresh" class="text-btn" type="button">刷新</button></div>
+<div id="progress" class="progress" aria-live="polite" hidden><div class="spinner"></div><div><strong id="progress-title">正在生成</strong><small id="progress-detail">通常需要 1–3 分钟</small></div></div>
+<div id="empty" class="empty"><div class="sticker-stack" aria-hidden="true"><svg viewBox="0 0 64 72" aria-hidden="true" fill="none"><rect x="4" y="4" width="56" height="64" rx="12" fill="currentColor" stroke="#ffffff" stroke-width="5"/><circle cx="24" cy="25" r="5" stroke="#7e6592" stroke-width="2"/><path d="M16 52L28 38L38 46L45 39L51 52H16Z" stroke="#7e6592" stroke-width="2" stroke-linejoin="round"/></svg><svg viewBox="0 0 64 72" aria-hidden="true" fill="none"><rect x="4" y="4" width="56" height="64" rx="12" fill="currentColor" stroke="#ffffff" stroke-width="5"/><circle cx="24" cy="25" r="5" stroke="#7e6592" stroke-width="2"/><path d="M16 52L28 38L38 46L45 39L51 52H16Z" stroke="#7e6592" stroke-width="2" stroke-linejoin="round"/></svg><svg viewBox="0 0 64 72" aria-hidden="true" fill="none"><rect x="4" y="4" width="56" height="64" rx="12" fill="currentColor" stroke="#ffffff" stroke-width="5"/><circle cx="24" cy="25" r="5" stroke="#7e6592" stroke-width="2"/><path d="M16 52L28 38L38 46L45 39L51 52H16Z" stroke="#7e6592" stroke-width="2" stroke-linejoin="round"/></svg></div><p>生成后在这里预览和下载</p></div>
+<div id="job-info" class="job-info" aria-live="polite" hidden></div>
+<div id="tools" class="result-tools" hidden><div class="background-switch" role="group" aria-label="预览背景"><button id="bg-light" type="button" class="selected">浅底</button><button id="bg-dark" type="button">深底</button><button id="bg-checker" type="button">透明</button></div><a id="zip" class="primary" download>下载整包 ↓</a></div>
+<div id="result-grid" class="result-grid"></div>
+<details id="diagnostics" hidden><summary>原图与质量检查</summary><p id="job-details"></p><div id="diagnostic-links"></div></details>
+<details class="wechat-note"><summary>微信下载说明</summary><p>240×240 GIF、120×120 PNG 缩略图，以及透明 PNG / APNG。GIF 按 100 KB 制作目标压缩并显示实测大小。</p><p>下载后可尝试添加为微信自定义表情；客户端导入和表情商店上架以平台实际要求为准。本页不自动上传微信。</p></details>
+<details class="history" open><summary>最近作品</summary><div id="history"></div></details>
+</section>
+</div>
+</main><script src="/app.js"></script>
+</body></html>

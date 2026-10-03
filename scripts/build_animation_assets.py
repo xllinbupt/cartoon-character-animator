@@ -105,17 +105,20 @@ def transparent_gif_frame(img: Image.Image) -> Image.Image:
     return pal
 
 
-def save_sequence(out: Path, name: str, frames: list[Image.Image], duration: int, loop: int) -> None:
+def save_sequence(out: Path, name: str, frames: list[Image.Image], duration: int | list[int], loop: int | None, write_frames: bool = True) -> None:
     for folder in ["frames", "gif", "apng", "webp"]:
         (out / folder).mkdir(parents=True, exist_ok=True)
     frame_dir = out / "frames" / name
     frame_dir.mkdir(parents=True, exist_ok=True)
-    for i, frame in enumerate(frames, 1):
-        frame.save(frame_dir / f"f{i:02d}.png")
+    if write_frames:
+        for i, frame in enumerate(frames, 1):
+            frame.save(frame_dir / f"f{i:02d}.png")
     gif_frames = [transparent_gif_frame(frame) for frame in frames]
-    gif_frames[0].save(out / "gif" / f"{name}.gif", save_all=True, append_images=gif_frames[1:], duration=duration, loop=loop, disposal=2, transparency=255)
-    frames[0].save(out / "apng" / f"{name}.png", save_all=True, append_images=frames[1:], duration=duration, loop=loop, disposal=2)
-    frames[0].save(out / "webp" / f"{name}.webp", save_all=True, append_images=frames[1:], duration=duration, loop=loop, lossless=True, quality=96)
+    gif_loop = {} if loop is None else {"loop": loop}
+    gif_frames[0].save(out / "gif" / f"{name}.gif", save_all=True, append_images=gif_frames[1:], duration=duration, disposal=2, transparency=255, **gif_loop)
+    media_loop = 1 if loop is None else loop
+    frames[0].save(out / "apng" / f"{name}.png", save_all=True, append_images=frames[1:], duration=duration, loop=media_loop, disposal=2)
+    frames[0].save(out / "webp" / f"{name}.webp", save_all=True, append_images=frames[1:], duration=duration, loop=media_loop, lossless=True, quality=96)
 
 
 def crop_sheets(manifest: dict[str, Any], manifest_dir: Path, out: Path) -> dict[str, Image.Image]:
@@ -126,7 +129,14 @@ def crop_sheets(manifest: dict[str, Any], manifest_dir: Path, out: Path) -> dict
         path = Path(sheet["path"])
         if not path.is_absolute():
             path = manifest_dir / path
-        src = Image.open(path).convert("RGBA")
+        with Image.open(path) as source:
+            src = source.convert("RGBA")
+        # Explicit keys protect colored characters. Existing RGBA assets retain alpha.
+        background = sheet.get("background", manifest.get("background"))
+        if background is not None:
+            from action_sheet import matte
+            src = matte(src, background)
+        has_alpha = src.getchannel("A").getextrema()[0] < 255
         cols = int(sheet["cols"])
         rows = int(sheet["rows"])
         gutter = int(sheet.get("gutter", 8))
@@ -137,7 +147,8 @@ def crop_sheets(manifest: dict[str, Any], manifest_dir: Path, out: Path) -> dict
             top = round(row * src.height / rows) + gutter
             bottom = round((row + 1) * src.height / rows) - gutter
             cell = src.crop((left, top, right, bottom))
-            cell = remove_edge_connected_light(chroma_to_alpha(cell))
+            if not has_alpha:
+                cell = remove_edge_connected_light(chroma_to_alpha(cell))
             sprite = normalize_sprite(trim_alpha(cell, int(sheet.get("pad", 10))), target_height)
             sprites[name] = sprite
             sprite.save(out / "sprites" / f"{name}.png")
@@ -210,11 +221,48 @@ article{{border:1px solid #dbe3ef;border-radius:8px;background:#fff;overflow:hid
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--task", choices=("build", "prepare", "audit", "repair", "review"), default="build")
+    parser.add_argument("--sheet", type=Path)
+    parser.add_argument("--previous", type=Path)
+    parser.add_argument("--action")
+    parser.add_argument("--verdict", choices=("approved", "rejected"))
+    parser.add_argument("--note")
+    parser.add_argument("--defect-stage", choices=("upstream", "processing", "animation"))
     args = parser.parse_args()
 
+    if args.task == "review":
+        if not all((args.action, args.verdict, args.note)):
+            parser.error("review needs --action, --verdict and --note")
+        from action_sheet import review
+        print(json.dumps(review(args.out, args.action, args.verdict, args.note, args.defect_stage), ensure_ascii=False))
+        return
+    if not args.manifest:
+        parser.error("--manifest is required")
     manifest = load_manifest(args.manifest)
+    if manifest.get("schema") == "pet-action-request/v1":
+        from action_sheet import validate, prepare, build, repair, read
+        validate(manifest)
+        if args.task == "prepare":
+            result = prepare(manifest, args.out)
+        elif args.task == "audit":
+            if not args.sheet:
+                parser.error("alpha audit needs --sheet")
+            from alpha_qa import audit
+            result = audit(manifest, args.sheet, args.out)
+        elif args.task == "repair":
+            if not args.previous:
+                parser.error("repair needs --previous bundle")
+            result = repair(manifest, read(args.previous / "manifest.json"), args.out)
+        else:
+            if not args.sheet:
+                parser.error("action-row build needs --sheet")
+            result = build(manifest, args.sheet, args.out, args.previous)
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.task != "build" or args.sheet or args.previous:
+        parser.error("legacy manifest supports build without --sheet/--previous")
     canvas = tuple(manifest.get("canvas", [360, 360]))
     if len(canvas) != 2:
         raise ValueError("canvas must be [width, height]")

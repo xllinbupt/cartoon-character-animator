@@ -1,4 +1,4 @@
 interface:
   display_name: "Cartoon Character Animator"
-  short_description: "Generate consistent cartoon animation assets from photos"
-  default_prompt: "Use $cartoon-character-animator to create consistent cartoon character animation assets from my reference photos and requested actions."
+  short_description: "Seedream 5.0 action sheets and a cartoon expression studio"
+  default_prompt: "Use $cartoon-character-animator with Seedream 5.0 Pro to create consistent 12-frame action sheets from my character reference, export PNG/GIF/APNG/WebP, and repair only failed actions."

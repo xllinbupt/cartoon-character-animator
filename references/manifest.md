@@ -1,5 +1,7 @@
 # Manifest
 
+For full 12-frame-per-action sheets, use [action-sheet.md](action-sheet.md). This file documents the original compatible sheets/sequences mode.
+
 `scripts/build_animation_assets.py` reads a JSON manifest from the chosen output folder.
 
 Minimal structure:
@@ -50,3 +52,5 @@ Sequence types:
 - `smooth_locomotion`: one side-view sprite animated with scale, bob, and lean. Set `flip: true` for left-facing movement.
 
 All paths are relative to the manifest file unless absolute.
+
+Existing transparent PNG sheets keep their original alpha instead of globally removing green/white pixels. Opaque legacy sheets still use the original automatic cleanup for compatibility. For new opaque assets, configure an explicit background at manifest or sheet level, e.g. `"background":{"mode":"chroma","key":"#FF00FF"}`; the key must not occur in the character. Legacy `target_body_height` still normalizes each sprite; use action-row mode to retain crouching/lying height differences.

@@ -46,8 +46,11 @@ class StudioTests(unittest.TestCase):
         self.assertTrue((studio.folder(one['id'])/'reference-original').exists())
         self.assertTrue((studio.folder(one['id'])/'layout-guide.png').exists())
         self.assertEqual(one['layout'],{'columns':12,'rows':1,'frames':12,'order':'expression-rows'})
-        with self.assertRaises(ValueError):
-            studio.create({**payload(),'request_id':'another-request-123456789'},submit=False)
+        duplicate=studio.create({**payload(),'request_id':'another-request-123456789'},submit=False)
+        self.assertEqual(duplicate['id'],one['id'])
+        self.assertTrue(duplicate['reused_request'])
+        with self.assertRaisesRegex(ValueError,'已有任务'):
+            studio.create({**payload(),'request_id':'different-request-123456789','expressions':[{'name':'谢谢','description':'双手合起点头'}]},submit=False)
 
     def test_invalid_uploads_and_names(self):
         for change in ({'image':'not-data'}, {'expressions':[]}, {'expressions':[{'name':'x','description':''}]}, {'outline':'yes'}, {'mode':'video'}):
@@ -89,7 +92,9 @@ class StudioTests(unittest.TestCase):
         studio.update(job['id'],status='failed',provider_error={'error_code':'OutputImageSensitiveContentDetected.PolicyViolation'})
         changed={**payload(),'request_id':'different-request-12345678'}
         with patch.object(studio,'credential') as key,patch.object(studio.POOL,'submit') as submit:
-            with self.assertRaisesRegex(ValueError,'未再次调用'):studio.create(changed)
+            reused=studio.create(changed)
+            self.assertEqual(reused['id'],job['id'])
+            self.assertTrue(reused['reused_request'])
         key.assert_not_called();submit.assert_not_called()
         self.assertEqual(len(studio.jobs()),1)
 
@@ -151,6 +156,63 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(result['model_calls'],1)
         self.assertFalse((studio.folder(job['id'])/'stickers.zip').exists())
         self.assertIn('凑帧',result['message'])
+
+
+    def rejected_job(self):
+        job=studio.create(payload(),submit=False)
+        return studio.update(job['id'],status='failed',model_calls=1,
+            provider_error={'http_status':400,'error_code':'OutputImageSensitiveContentDetected.PolicyViolation'})
+
+    def test_manual_retry_requires_explicit_cost_confirmation(self):
+        job=self.rejected_job()
+        for confirmation in (None,False,'true',1):
+            with patch.object(studio.POOL,'submit') as submit:
+                with self.assertRaisesRegex(ValueError,'明确确认'):
+                    studio.retry_generation(job['id'],{'confirm_cost':confirmation,'request_id':'retry-request-123456789'})
+            submit.assert_not_called()
+        self.assertEqual(len(studio.jobs()),1)
+
+    def test_manual_retry_is_one_call_idempotent_and_preserves_input(self):
+        job=self.rejected_job()
+        args={'confirm_cost':True,'request_id':'retry-request-123456789'}
+        with patch.object(studio,'credential',return_value='dummy-key'),patch.object(studio.POOL,'submit') as submit:
+            retried=studio.retry_generation(job['id'],args)
+            repeated=studio.retry_generation(job['id'],args)
+        self.assertEqual(submit.call_count,1)
+        self.assertEqual(retried['id'],repeated['id'])
+        self.assertEqual(retried['retry_of'],job['id'])
+        for field in ('expressions','identity','outline','model'):
+            self.assertEqual(retried[field],job[field])
+        self.assertEqual((studio.folder(job['id'])/'reference-original').read_bytes(),
+            (studio.folder(retried['id'])/'reference-original').read_bytes())
+        self.assertFalse(studio.view_job(job)['manual_retry_available'])
+        self.assertFalse(studio.view_job(retried)['manual_retry_available'])
+        studio.update(retried['id'],status='failed')
+        with self.assertRaisesRegex(ValueError,'最多手动重试一次'):
+            studio.retry_generation(job['id'],{**args,'request_id':'second-retry-123456789'})
+        with self.assertRaisesRegex(ValueError,'最多手动重试一次'):
+            studio.retry_generation(retried['id'],{**args,'request_id':'child-retry-123456789'})
+
+    def test_manual_retry_refuses_source_or_changed_model(self):
+        job=self.rejected_job()
+        args={'confirm_cost':True,'request_id':'retry-request-123456789'}
+        with patch.object(studio.POOL,'submit') as submit:
+            studio.update(job['id'],source_available=True)
+            with self.assertRaisesRegex(ValueError,'有原图请免费'):studio.retry_generation(job['id'],args)
+            studio.update(job['id'],source_available=False,model='different-model')
+            with self.assertRaisesRegex(ValueError,'模型配置已改变'):studio.retry_generation(job['id'],args)
+        submit.assert_not_called()
+        self.assertEqual(len(studio.jobs()),1)
+
+    def test_legacy_rejection_reuses_without_permanent_local_error(self):
+        job=self.rejected_job()
+        studio.update(job['id'],request_fingerprint=None)
+        data={**payload(),'request_id':'new-request-123456789'}
+        with patch.object(studio.POOL,'submit') as submit:
+            recovered=studio.create(data)
+        self.assertEqual(recovered['id'],job['id'])
+        self.assertTrue(studio.view_job(recovered)['manual_retry_available'])
+        submit.assert_not_called()
 
     def test_provider_timeout_is_one_post(self):
         job=studio.create(payload(),submit=False)

@@ -153,11 +153,11 @@ def fingerprint(raw, mode, items, identity, outline):
 
 
 def policy_rejected(job):
-    code = job.get('provider_error', {}).get('error_code') or ''
+    code = (job.get('provider_error') or {}).get('error_code') or ''
     return 'SensitiveContentDetected' in code or 'RiskDetection' in code
 
 
-def create(payload, submit=True):
+def create(payload, submit=True, retry_of=None):
     mode, items, identity, outline, image, raw = validate(payload)
     request_id = payload.get('request_id')
     if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]{16,80}', request_id):
@@ -169,6 +169,8 @@ def create(payload, submit=True):
             if existing.get('request_id') == request_id:
                 return existing
         for existing in records:
+            if existing['status'] in ACTIVE and existing.get('request_fingerprint') == signature and retry_of is None:
+                return {**existing, 'reused_request': True}
             if not policy_rejected(existing):
                 continue
             previous = existing.get('request_fingerprint')
@@ -176,8 +178,8 @@ def create(payload, submit=True):
                 original = folder(existing['id']) / 'reference-original'
                 if original.is_file():
                     previous = fingerprint(original.read_bytes(), existing['mode'], existing['expressions'], existing.get('identity', ''), existing.get('outline', False))
-            if signature == previous:
-                raise ValueError('这份请求已被服务端内容检查拒绝，未再次调用生图。可在失败任务中复制诊断信息，向服务提供方核查。')
+            if signature == previous and retry_of is None:
+                return {**existing, 'reused_request': True}
         for existing in records:
             if existing['status'] in ACTIVE:
                 raise ValueError('已有任务正在生成，请等它结束后再提交')
@@ -194,7 +196,7 @@ def create(payload, submit=True):
         visible.convert('RGB').save(destination / 'generation-reference.png')
         job = {'id': job_id, 'request_id': request_id, 'created_at': datetime.now(timezone.utc).isoformat(),
                'mode': mode, 'expressions': items, 'identity': identity, 'outline': outline, 'request_fingerprint': signature,
-               'layout': plan(mode, len(items)), 'status': 'queued', 'message': '等待生成',
+               'layout': plan(mode, len(items)), 'status': 'queued', 'message': '等待生成', 'retry_of': retry_of,
                'model': MODEL, 'model_calls': 0, 'results': [], 'warnings': [], 'key': choose_key(image)}
         guide = Image.new('RGB', (job['layout']['columns']*160, job['layout']['rows']*160), job['key'])
         draw = ImageDraw.Draw(guide)
@@ -207,6 +209,42 @@ def create(payload, submit=True):
         if submit:
             POOL.submit(run, job_id)
         return job
+
+
+def view_job(job):
+    records = jobs()
+    return {**job, 'manual_retry_available': job['status'] == 'failed'
+        and not job.get('source_available') and not job.get('retry_of')
+        and not any(j.get('retry_of') == job['id'] for j in records)}
+
+
+def retry_generation(job_id, payload, submit=True):
+    if payload.get('confirm_cost') is not True:
+        raise ValueError('再次生图可能计费，请先明确确认；尚未提交')
+    request_id = payload.get('request_id')
+    if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]{16,80}', request_id):
+        raise ValueError('请求编号无效，请刷新页面重试')
+    with LOCK:
+        job = read_job(job_id)
+        records = jobs()
+        for existing in records:
+            if existing.get('request_id') == request_id:
+                if existing.get('retry_of') != job_id:
+                    raise ValueError('请求编号已用于其他任务')
+                return existing
+        if not view_job(job)['manual_retry_available']:
+            raise ValueError('该任务不能再次生图；有原图请免费重新处理，每个失败任务最多手动重试一次')
+        if job.get('model') != MODEL:
+            raise ValueError('模型配置已改变，请新建任务；不会自动切换模型重试')
+        raw = (folder(job_id)/'reference-original').read_bytes()
+        with Image.open(BytesIO(raw)) as image:
+            mime = {'PNG':'png','JPEG':'jpeg','WEBP':'webp'}.get(image.format)
+        if mime is None:
+            raise ValueError('原始参考图格式无法读取')
+        data = {'request_id': request_id, 'image': f'data:image/{mime};base64,'+base64.b64encode(raw).decode(),
+                'mode': job['mode'], 'expressions': job['expressions'],
+                'identity': job.get('identity', ''), 'outline': job.get('outline', False)}
+        return create(data, submit=submit, retry_of=job_id)
 
 
 def provider_generate(job):
@@ -436,9 +474,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/config':
                 return self.response({'model': MODEL, 'credential_ready': bool(credential()), 'max_expressions': 10, 'frames': 12, 'scope': 'local', 'sample_available': (STATIC/'sample.png').exists()})
             if path == '/api/jobs':
-                return self.response({'jobs': jobs()[:20]})
+                return self.response({'jobs': [view_job(j) for j in jobs()[:20]]})
             if re.fullmatch(r'/api/jobs/[a-f0-9]{32}', path):
-                return self.response(read_job(path.split('/')[-1]))
+                return self.response(view_job(read_job(path.split('/')[-1])))
             if path.startswith('/files/'):
                 parts = path.split('/')
                 directory = folder(parts[2])
@@ -458,18 +496,20 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(True):
             return
         path = urlparse(self.path).path
-        if path != '/api/jobs' and not re.fullmatch(r'/api/jobs/[a-f0-9]{32}/process', path):
+        if path != '/api/jobs' and not re.fullmatch(r'/api/jobs/[a-f0-9]{32}/(process|retry)', path):
             return self.response({'error': '接口不存在'}, 404)
         try:
             if path.endswith('/process'):
-                return self.response(reprocess(path.split('/')[3]), 202)
+                return self.response(view_job(reprocess(path.split('/')[3])), 202)
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= MAX_BODY:
                 raise ValueError('上传数据过大或为空')
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError('请求格式无效')
-            return self.response(create(payload), 202)
+            if path.endswith('/retry'):
+                return self.response(view_job(retry_generation(path.split('/')[3], payload)), 202)
+            return self.response(view_job(create(payload)), 202)
         except (ValueError, OSError, Image.DecompressionBombError) as error:
             self.response({'error': str(error)[:200]}, 400)
         except Exception:

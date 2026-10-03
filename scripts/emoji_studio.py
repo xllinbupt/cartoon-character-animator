@@ -2,6 +2,9 @@
 """Loopback sticker studio. One Ark POST per job; no automatic generation retry."""
 import argparse
 import base64
+import colorsys
+import hashlib
+import statistics
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -109,7 +112,7 @@ def plan(mode, count):
     if mode == 'static':
         cols = min(4, count)
         return {'columns': cols, 'rows': math.ceil(count / cols), 'frames': 1}
-    return {'columns': 4 if count == 1 else 8, 'rows': 3 * math.ceil(count / 2), 'frames': 12}
+    return {'columns': 12, 'rows': count, 'frames': 12, 'order': 'expression-rows'}
 
 
 def choose_key(image):
@@ -125,24 +128,33 @@ def choose_key(image):
 
 def prompt_for(job):
     layout = job['layout']
-    text = [f"One cartoon sticker sheet, EXACTLY {layout['columns']} columns by {layout['rows']} rows, equal invisible slots.",
-            'Input image is CHARACTER IDENTITY only. Preserve exact species, face, head/body proportions, original colors, eyes, clothing and accessories. Never reinterpret the character.',
-            'Flat 2D cartoon matching reference. Complete bodies and limbs within generous cell padding. One consistent global character scale. No visible grid, labels, lettering, watermark, motion lines or floor shadows.',
-            f"Background perfectly flat {job['key']}, OPAQUE image, NOT transparent. This key color belongs only to background; keep pale body areas, white eye highlights and all props fully drawn and opaque. Never paint the background key color onto the character.",
-            'Second reference is LAYOUT GEOMETRY only: use exactly its columns, rows and invisible slots, but do not copy its grid lines into the output.']
+    text = [f"ONE cartoon sticker sheet: exactly {layout['columns']} columns x {layout['rows']} rows; equal invisible cells, no extra poses.",
+        'First reference controls character identity: same face, colors, proportions, clothing and accessories. Match its cartoon style. Second reference controls cell layout only; do not draw its lines.',
+        'Complete character and props inside each cell with clear space around all edges. Keep one global character scale. No labels, lettering, watermark, shadows, effects or scene.',
+        f"Flat solid background {job['key']} only. Keep all subject colors, pale areas and eye highlights opaque; background color must not appear on the subject. No gradient or texture."]
     if job['identity']:
-        text.append('Must preserve: ' + job['identity'])
+        text.append('Preserve: ' + job['identity'])
+    if job['mode'] == 'animated':
+        text.append('Each row is ONE independent 12-frame looping expression. Read frames left to right: 1-4 anticipation/start, 5-8 action peak, 9-12 recovery to frame 1. Eyes and limbs change through continuous poses; never duplicate a still pose to fill cells. Use the same hand throughout waving.')
     for i, item in enumerate(job['expressions']):
         if job['mode'] == 'static':
             row, col = divmod(i, layout['columns'])
-            text.append(f"Cell row {row+1}, column {col+1}: expression {item['name']!r}: {item['description']}. Draw a single clear expressive pose; name is metadata, not image text.")
+            text.append(f"Cell {row+1},{col+1}: {item['name']}: {item['description']}")
         else:
-            block_row, block_col = divmod(i, 2)
-            text.append(f"Expression {i+1}, {item['name']!r}: {item['description']}. Occupies rows {block_row*3+1} through {block_row*3+3}, columns {block_col*4+1} through {block_col*4+4}: a 4x3 block of exactly TWELVE continuous poses, left-to-right then top-to-bottom. Frames 1-4 anticipation and expression begins, 5-8 clear expression/action peak, 9-12 recovery to frame 1. Show actual changes to eyes, face and limbs; not static copies. This one expression loops independently.")
-    occupied = len(job['expressions']) * layout['frames']
-    if occupied < layout['columns'] * layout['rows']:
-        text.append('Unused final cells/block stay empty flat background key, never add new characters or poses.')
+            text.append(f"ROW {i+1}, exactly 12 poses: {item['name']}: {item['description']}")
+    if len(job['expressions']) * layout['frames'] < layout['columns'] * layout['rows']:
+        text.append('Unused final cells remain empty flat background.')
     return '\n\n'.join(text)
+
+
+def fingerprint(raw, mode, items, identity, outline):
+    content = json.dumps([mode, items, identity, outline], ensure_ascii=False, sort_keys=True).encode()
+    return hashlib.sha256(raw + b'\0' + content).hexdigest()
+
+
+def policy_rejected(job):
+    code = job.get('provider_error', {}).get('error_code') or ''
+    return 'SensitiveContentDetected' in code or 'RiskDetection' in code
 
 
 def create(payload, submit=True):
@@ -150,11 +162,22 @@ def create(payload, submit=True):
     request_id = payload.get('request_id')
     if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]{16,80}', request_id):
         raise ValueError('请求编号无效，请刷新页面重试')
+    signature = fingerprint(raw, mode, items, identity, outline)
     with LOCK:
         records = jobs()
         for existing in records:
             if existing.get('request_id') == request_id:
                 return existing
+        for existing in records:
+            if not policy_rejected(existing):
+                continue
+            previous = existing.get('request_fingerprint')
+            if previous is None:
+                original = folder(existing['id']) / 'reference-original'
+                if original.is_file():
+                    previous = fingerprint(original.read_bytes(), existing['mode'], existing['expressions'], existing.get('identity', ''), existing.get('outline', False))
+            if signature == previous:
+                raise ValueError('这份请求已被服务端内容检查拒绝，未再次调用生图。可在失败任务中复制诊断信息，向服务提供方核查。')
         for existing in records:
             if existing['status'] in ACTIVE:
                 raise ValueError('已有任务正在生成，请等它结束后再提交')
@@ -170,7 +193,7 @@ def create(payload, submit=True):
         visible.alpha_composite(image)
         visible.convert('RGB').save(destination / 'generation-reference.png')
         job = {'id': job_id, 'request_id': request_id, 'created_at': datetime.now(timezone.utc).isoformat(),
-               'mode': mode, 'expressions': items, 'identity': identity, 'outline': outline,
+               'mode': mode, 'expressions': items, 'identity': identity, 'outline': outline, 'request_fingerprint': signature,
                'layout': plan(mode, len(items)), 'status': 'queued', 'message': '等待生成',
                'model': MODEL, 'model_calls': 0, 'results': [], 'warnings': [], 'key': choose_key(image)}
         guide = Image.new('RGB', (job['layout']['columns']*160, job['layout']['rows']*160), job['key'])
@@ -218,6 +241,52 @@ def with_outline(image):
     return under
 
 
+def measured_chroma(raw, requested):
+    """Calibrate an already-chosen key from confident border samples, not body colors."""
+    expected = tuple(int(requested[i:i+2], 16) for i in (1, 3, 5))
+    hue = colorsys.rgb_to_hsv(*(v/255 for v in expected))[0]
+    coordinates = {(x, y) for x in range(0, raw.width, max(1, raw.width//128)) for y in (0, raw.height-1)}
+    coordinates.update((x, y) for y in range(0, raw.height, max(1, raw.height//128)) for x in (0, raw.width-1))
+    samples = []
+    for position in coordinates:
+        pixel = raw.getpixel(position)
+        h, saturation, value = colorsys.rgb_to_hsv(*(v/255 for v in pixel[:3]))
+        hue_distance = min(abs(h-hue), 1-abs(h-hue))
+        if pixel[3] > 250 and saturation > .35 and value > .45 and hue_distance < .09:
+            samples.append(pixel[:3])
+    if len(samples) < len(coordinates) * .75:
+        return requested
+    median = tuple(round(statistics.median(p[i] for p in samples)) for i in range(3))
+    if math.dist(median, expected) > 150:
+        return requested
+    distances = sorted(math.dist(p, median) for p in samples)
+    if distances[int((len(distances)-1)*.9)] > 85:
+        return requested
+    return '#' + ''.join(f'{v:02X}' for v in median)
+
+
+def reprocess(job_id, submit=True):
+    with LOCK:
+        job = read_job(job_id)
+        if not job.get('source_available') or not (folder(job_id)/'source.png').is_file():
+            raise ValueError('该任务没有可处理的原图，不能重新导出')
+        if job['status'] != 'failed' or any(j['status'] in ACTIVE for j in jobs()):
+            raise ValueError('请等待当前任务结束；仅可重新处理失败任务的已有原图')
+        job = update(job_id, status='processing', message='正在重新处理已有原图，不调用生图',
+                     processing_attempts=job.get('processing_attempts', 1)+1)
+        if submit:
+            POOL.submit(run_processing, job_id)
+        return job
+
+
+def run_processing(job_id):
+    try:
+        process(job_id)
+    except Exception as error:
+        message = str(error) if isinstance(error, ValueError) else '原图处理未完成，已保留原图和诊断信息'
+        update(job_id, status='failed', message=message[:400])
+
+
 def process(job_id, background=None):
     job = read_job(job_id)
     destination = folder(job_id)
@@ -228,12 +297,15 @@ def process(job_id, background=None):
         if job['mode'] == 'static':
             cells = min(cols, count - row * cols)
         else:
-            cells = 4 if count % 2 and row >= rows - 3 else cols
+            cells = cols if layout.get('order') == 'expression-rows' else (4 if count % 2 and row >= rows - 3 else cols)
         actions.append({'id': f'row{row}', 'name': f'布局第{row+1}行', 'frames': cells, 'fps': 10, 'loop': True, 'motion': {'type': 'none'}, 'root_motion': 'frames'})
     request = {'schema': 'pet-action-request/v1', 'layout': {'columns': cols, 'frame_size': [240, 240], 'padding': 16, 'placement': 'preserve-cell'}, 'actions': actions}
-    request['background'] = background or {'mode': 'chroma', 'key': job.get('key', '#FF00FF'), 'threshold': 45, 'softness': 70}
     with Image.open(destination / 'source.png') as source:
         raw = source.convert('RGBA')
+    requested_key = job.get('key', '#FF00FF')
+    actual_key = measured_chroma(raw, requested_key)
+    request['background'] = background or {'mode': 'chroma', 'key': actual_key, 'threshold': 45, 'softness': 70}
+    write(destination / 'processing-diagnostic.json', {'requested_key': requested_key, 'measured_key': actual_key, 'expected_layout': layout, 'model_calls_added': 0})
     image = matte(raw, request['background'])
     extracted = extract(request, image)
     audit = audit_sheet(request, raw, image, destination, extracted)
@@ -242,13 +314,18 @@ def process(job_id, background=None):
     failed = {key: v['errors'] for key, v in extracted.items() if v['errors']}
     if failed:
         write(destination / 'extraction-errors.json', failed)
-        raise ValueError('合图布局或完整性检查失败，未强切或凑帧；请查看原图。可修改描述后创建新任务。')
+        update(job_id, processing_error={'type': 'layout_or_integrity', 'failed_rows': len(failed), 'expected_rows': rows, 'expected_columns': cols})
+        raise ValueError(f'原图未通过帧数或完整性检查（要求 {cols} 列 × {rows} 行）；不能按错误格子强切或复制姿势凑帧。原图已保留，可查看检查报告；重新处理原图不调用生图。')
     results = []
     warnings = ['模型生成的姿势、角色一致性和边缘需要目视检查；自动检测不等于视觉通过。']
+    if actual_key != requested_key:
+        warnings.append('原图背景偏离指定色键；已按边界背景采样校准，仅用于本地处理，原图未改动。')
     for index, item in enumerate(job['expressions']):
         if job['mode'] == 'static':
             row, col = divmod(index, cols)
             frames = [extracted[f'row{row}']['frames'][col]]
+        elif layout.get('order') == 'expression-rows':
+            frames = extracted[f'row{index}']['frames']
         else:
             block_row, block_col = divmod(index, 2)
             frames = [extracted[f'row{block_row*3+r}']['frames'][block_col*4+c] for r in range(3) for c in range(4)]
@@ -287,7 +364,7 @@ def process(job_id, background=None):
             for source, suffix in (('wechat.gif', '.gif'), ('thumbnail.png', '-缩略图.png'), ('sticker.png', '.png'), ('sticker.apng.png', '.apng.png')):
                 archive.write(destination / f'output/{n:02d}' / source, f'{n:02d}-{label}{suffix}')
         archive.write(destination / 'export-manifest.json', '导出说明.json')
-    return update(job_id, status='completed', message='生成完成，检查表情后即可下载', results=results, warnings=warnings,
+    return update(job_id, status='completed', message='生成完成，检查表情后即可下载', results=results, warnings=warnings, processing_error=None,
                   alpha_warning_rows=sum(bool(v['warnings']) for v in audit['actions'].values()))
 
 
@@ -366,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.split('/')
                 directory = folder(parts[2])
                 relative = '/'.join(parts[3:])
-                allowed = relative in ('source.png', 'reference.png', 'prompt.txt', 'alpha-qa.json', 'stickers.zip', 'extraction-errors.json', 'export-manifest.json') or re.fullmatch(r'output/[0-9]{2}/(wechat.gif|thumbnail.png|sticker.png|sticker.apng.png|contact-dark.png|contact-light.png|frame-[0-9]{2}.png)', relative)
+                allowed = relative in ('source.png', 'reference.png', 'prompt.txt', 'alpha-qa.json', 'stickers.zip', 'extraction-errors.json', 'processing-diagnostic.json', 'export-manifest.json') or re.fullmatch(r'output/[0-9]{2}/(wechat.gif|thumbnail.png|sticker.png|sticker.apng.png|contact-dark.png|contact-light.png|frame-[0-9]{2}.png)', relative)
                 if not allowed:
                     raise ValueError('文件路径无效')
                 return self.file(directory / relative, relative == 'stickers.zip')
@@ -380,9 +457,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed(True):
             return
-        if urlparse(self.path).path != '/api/jobs':
+        path = urlparse(self.path).path
+        if path != '/api/jobs' and not re.fullmatch(r'/api/jobs/[a-f0-9]{32}/process', path):
             return self.response({'error': '接口不存在'}, 404)
         try:
+            if path.endswith('/process'):
+                return self.response(reprocess(path.split('/')[3]), 202)
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= MAX_BODY:
                 raise ValueError('上传数据过大或为空')

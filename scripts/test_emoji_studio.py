@@ -45,7 +45,7 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(one['model_calls'],0)
         self.assertTrue((studio.folder(one['id'])/'reference-original').exists())
         self.assertTrue((studio.folder(one['id'])/'layout-guide.png').exists())
-        self.assertEqual(one['layout'],{'columns':4,'rows':3,'frames':12})
+        self.assertEqual(one['layout'],{'columns':12,'rows':1,'frames':12,'order':'expression-rows'})
         with self.assertRaises(ValueError):
             studio.create({**payload(),'request_id':'another-request-123456789'},submit=False)
 
@@ -59,7 +59,7 @@ class StudioTests(unittest.TestCase):
         data['expressions']=[{'name':f'表情{i+1}','description':'微笑眨眼再挥手'} for i in range(10)]
         mode,items,*_=studio.validate(data)
         self.assertEqual(len(items),10)
-        self.assertEqual(studio.plan(mode,10),{'columns':8,'rows':15,'frames':12})
+        self.assertEqual(studio.plan(mode,10),{'columns':12,'rows':10,'frames':12,'order':'expression-rows'})
         data['expressions'].append({'name':'第十一项','description':'微笑眨眼再挥手'})
         with self.assertRaisesRegex(ValueError,'1–10'):studio.validate(data)
 
@@ -82,6 +82,75 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(record['provider_error']['http_status'],400)
         self.assertIn('字段：size',record['message'])
         self.assertNotIn('dummy-private-key',json.dumps(record))
+
+
+    def test_policy_rejected_same_content_never_submits_again(self):
+        job=studio.create(payload(),submit=False)
+        studio.update(job['id'],status='failed',provider_error={'error_code':'OutputImageSensitiveContentDetected.PolicyViolation'})
+        changed={**payload(),'request_id':'different-request-12345678'}
+        with patch.object(studio,'credential') as key,patch.object(studio.POOL,'submit') as submit:
+            with self.assertRaisesRegex(ValueError,'未再次调用'):studio.create(changed)
+        key.assert_not_called();submit.assert_not_called()
+        self.assertEqual(len(studio.jobs()),1)
+
+    def test_border_key_calibration_preserves_subject_colors_and_source(self):
+        job=studio.create(payload('static'),submit=False)
+        original=Image.new('RGBA',(400,400),'#E93CD4')
+        draw=ImageDraw.Draw(original)
+        draw.rectangle((130,60,270,340),fill='#fff2d4')
+        draw.rectangle((130,150,270,190),fill='#2b7760')
+        draw.rectangle((160,200,240,230),fill='white')
+        path=studio.folder(job['id'])/'source.png';original.save(path)
+        saved=path.read_bytes()
+        self.assertEqual(studio.measured_chroma(original,'#FF00FF'),'#E93CD4')
+        result=studio.process(job['id'])
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(path.read_bytes(),saved)
+        with Image.open(studio.folder(job['id'])/'output/01/sticker.png') as image:
+            colors=list(studio.pixels(image))
+            self.assertTrue(any(p[3]>250 and p[:3]==(255,255,255) for p in colors))
+            self.assertTrue(any(p[3]>250 and p[:3]==(255,242,212) for p in colors))
+            self.assertTrue(any(p[3]>250 and p[:3]==(43,119,96) for p in colors))
+            self.assertEqual(image.getpixel((0,0))[3],0)
+        white=Image.new('RGBA',(400,400),'white')
+        self.assertEqual(studio.measured_chroma(white,'#FF00FF'),'#FF00FF')
+
+    def test_twelve_frame_rows_export_without_new_provider_call(self):
+        job=studio.create(payload(),submit=False)
+        im=Image.new('RGB',(1200,100),'#FF00FF');draw=ImageDraw.Draw(im)
+        for col in range(12):
+            draw.ellipse((col*100+30,15,col*100+70,85),fill='#ffe692')
+            draw.ellipse((col*100+40,30,col*100+45,35),fill='#203050')
+        im.save(studio.folder(job['id'])/'source.png')
+        studio.update(job['id'],status='failed',source_available=True,model_calls=1,processing_error={'type':'previous_failure'})
+        with patch.object(studio,'provider_generate') as provider:
+            queued=studio.reprocess(job['id'],submit=False)
+            self.assertEqual(queued['status'],'processing')
+            studio.run_processing(job['id'])
+        provider.assert_not_called()
+        result=studio.read_job(job['id'])
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['results'][0]['frames'],12)
+        self.assertIsNone(result['processing_error'])
+        self.assertEqual(result['model_calls'],1)
+        self.assertTrue((studio.folder(job['id'])/'stickers.zip').is_file())
+
+    def test_reprocess_refuses_missing_source_and_preserves_missing_frames(self):
+        job=studio.create(payload(),submit=False)
+        studio.update(job['id'],status='failed')
+        with self.assertRaisesRegex(ValueError,'没有可处理'):studio.reprocess(job['id'],submit=False)
+        im=Image.new('RGB',(1200,100),'#FF00FF');draw=ImageDraw.Draw(im)
+        for col in range(8):draw.ellipse((col*100+30,15,col*100+70,85),fill='#ffe692')
+        im.save(studio.folder(job['id'])/'source.png')
+        studio.update(job['id'],source_available=True,model_calls=1)
+        with patch.object(studio,'provider_generate') as provider:
+            studio.reprocess(job['id'],submit=False);studio.run_processing(job['id'])
+        provider.assert_not_called()
+        result=studio.read_job(job['id'])
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(result['model_calls'],1)
+        self.assertFalse((studio.folder(job['id'])/'stickers.zip').exists())
+        self.assertIn('凑帧',result['message'])
 
     def test_provider_timeout_is_one_post(self):
         job=studio.create(payload(),submit=False)

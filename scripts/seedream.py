@@ -25,6 +25,78 @@ class SeedreamError(ValueError):
     pass
 
 
+
+class SeedreamAPIError(SeedreamError):
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def http_failure(error, key, stage='generation'):
+    """Keep technical identifiers only; never relay arbitrary provider messages."""
+    def identifier(value, pattern):
+        return value if isinstance(value, str) and (not key or key not in value) and re.fullmatch(pattern, value) else None
+    try:
+        raw = error.read(65537)
+        data = json.loads(raw) if len(raw) <= 65536 else {}
+        detail = data.get('error', {}) if isinstance(data, dict) else {}
+        if not isinstance(detail, dict):
+            detail = {}
+    except Exception:
+        data, detail = {}, {}
+    finally:
+        error.close()
+    code = identifier(detail.get('code'), r'[A-Za-z][A-Za-z0-9_.-]{0,95}')
+    parameters = {'model', 'prompt', 'image', 'size', 'output_format', 'background', 'response_format', 'watermark'}
+    candidate_param = detail.get('param')
+    param = candidate_param if isinstance(candidate_param, str) and candidate_param in parameters else None
+    message = detail.get('message')
+    if isinstance(message, str) and not param:
+        match = re.search(r"\bparameter(?:s)?\s+['\"`]?([a-z_]+)\b", message, re.I)
+        if match and match.group(1) in parameters:
+            param = match.group(1)
+    request_id = None
+    candidates = [data.get('request_id') if isinstance(data, dict) else None, detail.get('request_id')]
+    if error.headers:
+        candidates.extend(error.headers.get(h) for h in ('X-Tt-Logid', 'X-Request-Id'))
+    if isinstance(message, str):
+        match = re.search(r'\bRequest[ _]id[:：]\s*([A-Za-z0-9_-]+)', message, re.I)
+        if match:
+            candidates.append(match.group(1))
+    for value in candidates:
+        request_id = identifier(value, r'[A-Za-z0-9_-]{8,128}')
+        if request_id:
+            break
+    diagnosis = {'http_status': error.code, 'error_code': code, 'parameter': param,
+                 'request_id': request_id, 'stage': stage}
+    category = '接口未说明可安全展示的具体原因'
+    if stage == 'download':
+        category = '原图下载被拒绝，可能已生成并计费，请先检查任务'
+    elif code and ('SensitiveContentDetected' in code or 'RiskDetection' in code):
+        category = '生成图片未通过服务端内容检查' if code.startswith('Output') else '输入内容未通过服务端内容检查'
+    elif code == 'ContentSecurityDetectionError':
+        category = '服务端内容检查服务异常'
+    elif code and code.startswith(('InvalidParameter', 'MissingParameter', 'InvalidImage', 'InvalidArgument', 'OutofContext')):
+        category = '请求参数或参考图不符合接口要求' + (f'（字段：{param}）' if param else '')
+    elif code and code.startswith(('ModelNotOpen', 'InvalidEndpoint', 'NotFound')):
+        category = '模型未开通或接入点不可用'
+    elif error.code == 401:
+        category = '本机凭证未通过鉴权'
+    elif code and 'ServiceOverdue' in code:
+        category = '账户欠费，需检查余额'
+    elif error.code == 403:
+        category = '请求被拒绝，需检查模型权限'
+    elif error.code == 429:
+        category = '请求达到速率或额度限制'
+    elif error.code >= 500:
+        category = '生图服务暂时异常'
+    label = '原图下载' if stage == 'download' else '生图接口'
+    text = f'{label} HTTP {error.code}：{category}' + (f'；错误码 {code}' if code else '')
+    if request_id:
+        text += f'；请求编号 {request_id}'
+    return SeedreamAPIError(text + '；未自动重试', diagnosis)
+
+
 def credential():
     value = os.environ.get('ARK_API_KEY', '').strip()
     if value:
@@ -103,6 +175,7 @@ def generate(prompt, references, output, size='2K', model=MODEL, background='opa
         raise SeedreamError('本机凭证格式无效；请检查空白或换行，不显示凭证内容')
     request = urllib.request.Request(API_URL, json.dumps(body).encode(),
         {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key}, method='POST')
+    stage = 'generation'
     try:
         if on_request is not None:
             on_request()
@@ -119,6 +192,7 @@ def generate(prompt, references, output, size='2K', model=MODEL, background='opa
             if urlparse(item['url']).scheme != 'https':
                 raise SeedreamError('接口返回了无效图片地址')
             # Compatibility download: signed URLs are never printed or logged.
+            stage = 'download'
             with urllib.request.urlopen(item['url'], timeout=90) as response:
                 content = response.read(MAX_IMAGE_BYTES + 1)
         else:
@@ -144,9 +218,7 @@ def generate(prompt, references, output, size='2K', model=MODEL, background='opa
                 'usage': safe_usage, 'requested_size': size, 'returned_size': dimensions,
                 'image_format': image_format, 'sha256': hashlib.sha256(content).hexdigest()}
     except urllib.error.HTTPError as error:
-        code = error.code
-        error.close()
-        raise SeedreamError(f'生图接口 HTTP {code}；未自动重试，请检查本机权限或额度') from None
+        raise http_failure(error, key, stage) from None
     except (TimeoutError, urllib.error.URLError):
         raise SeedreamError('生图或下载连接中断，可能已计费；未自动重试') from None
     except SeedreamError:
@@ -208,6 +280,8 @@ def main():
         message = str(error) if isinstance(error, SeedreamError) else '本机输入或返回图片无法读取，请检查输入文件；未自动重试'
         if record is not None and log.exists():
             record.update(status='failed', message=message, automatic_retry=False)
+            if isinstance(error, SeedreamAPIError):
+                record['provider_error'] = error.diagnostic
             log.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
         parser.exit(1, message + '\n')
 

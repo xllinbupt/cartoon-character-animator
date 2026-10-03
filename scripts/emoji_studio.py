@@ -23,7 +23,7 @@ import zipfile
 from PIL import Image, ImageOps, ImageFilter, ImageDraw
 from action_sheet import matte, extract, write, pixels
 from alpha_qa import audit_sheet, strip
-from seedream import MODEL, API_URL as ARK_URL, credential, generate, atlas_size
+from seedream import MODEL, API_URL as ARK_URL, credential, generate, atlas_size, SeedreamAPIError, http_failure
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'assets/emoji-studio'
@@ -297,8 +297,11 @@ def run(job_id):
         provider_generate(job)
         update(job_id, status='processing', message='正在检查布局并导出微信表情')
         process(job_id)
+    except SeedreamAPIError as error:
+        update(job_id, status='failed', message=str(error), provider_error=error.diagnostic)
     except urllib.error.HTTPError as error:
-        update(job_id, status='failed', message=f'生图接口返回 HTTP {error.code}，未自动重试；请检查服务端接口权限或额度。')
+        failure = http_failure(error, credential())
+        update(job_id, status='failed', message=str(failure), provider_error=failure.diagnostic)
     except (TimeoutError, urllib.error.URLError):
         update(job_id, status='failed', message='生图或下载超时，可能已计费，未自动重试。')
     except Exception as error:

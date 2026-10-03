@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from PIL import Image
@@ -73,6 +74,65 @@ class SeedreamTests(unittest.TestCase):
             with self.assertRaises(seedream.SeedreamError):
                 seedream.generate('ONE sheet',[self.ref],self.root/'source.png',key='dummy-key\nsecond-line')
         call.assert_not_called()
+
+
+    def test_http_parameter_error_is_actionable_and_does_not_retry(self):
+        failure=urllib.error.HTTPError(seedream.API_URL,400,'Bad Request',
+            {'X-Tt-Logid':'20261003-test-request-id'}, BytesIO(json.dumps({'error':{
+                'code':'InvalidParameter','message':'The parameter size is invalid; dummy-private-key',
+                'param':'size'}}).encode()))
+        with patch.object(seedream.urllib.request,'urlopen',side_effect=failure) as call:
+            with self.assertRaises(seedream.SeedreamAPIError) as caught:
+                seedream.generate('sheet',[self.ref],self.root/'source.png',key='dummy-private-key')
+        self.assertEqual(call.call_count,1)
+        error=caught.exception
+        self.assertIn('字段：size',str(error))
+        self.assertNotIn('额度',str(error))
+        self.assertNotIn('dummy-private-key',str(error))
+        self.assertEqual(error.diagnostic['request_id'],'20261003-test-request-id')
+        self.assertEqual(error.diagnostic['error_code'],'InvalidParameter')
+        self.assertFalse((self.root/'source.png').exists())
+        self.assertTrue(failure.fp.closed)
+
+    def test_http_content_rejection_is_not_reported_as_credentials(self):
+        failure=urllib.error.HTTPError(seedream.API_URL,400,'Bad Request',{},BytesIO(json.dumps({'error':{
+            'code':'OutputImageSensitiveContentDetected','message':'Request ID: request-12345678. private prompt'}}).encode()))
+        error=seedream.http_failure(failure,'dummy-private-key')
+        self.assertIn('生成图片未通过',str(error))
+        self.assertNotIn('权限',str(error))
+        self.assertNotIn('private prompt',str(error))
+        self.assertEqual(error.diagnostic['request_id'],'request-12345678')
+
+    def test_http_untrusted_error_fields_and_non_json_remain_private(self):
+        bodies=[json.dumps({'error':{'code':'InvalidParameter.dummy-private-key','param':{'private':'value'},
+                'request_id':'dummy-private-key','message':'Bearer dummy-private-key https://private.example/a?signature=abc'}}).encode(),
+                b'<html>dummy-private-key</html>',json.dumps(['dummy-private-key']).encode()]
+        for body in bodies:
+            error=seedream.http_failure(urllib.error.HTTPError(seedream.API_URL,400,'Bad Request',{},BytesIO(body)),'dummy-private-key')
+            public=str(error)+json.dumps(error.diagnostic)
+            self.assertNotIn('dummy-private-key',public)
+            self.assertNotIn('private.example',public)
+            self.assertNotIn('signature',public)
+            self.assertIsNone(error.diagnostic['error_code'])
+            self.assertIn('未说明',str(error))
+        download=seedream.http_failure(urllib.error.HTTPError('https://private.example',403,'Forbidden',{},BytesIO(b'')),'dummy-private-key','download')
+        self.assertIn('原图下载',str(download))
+        self.assertIn('可能已生成并计费',str(download))
+
+    def test_cli_failure_persists_safe_provider_diagnostic(self):
+        prompt=self.root/'prompt.txt';prompt.write_text('ONE sheet')
+        out=self.root/'out'
+        args=['seedream.py','--prompt',str(prompt),'--reference',str(self.ref),'--out',str(out)]
+        failure=urllib.error.HTTPError(seedream.API_URL,400,'Bad Request',{},BytesIO(json.dumps({'error':{
+            'code':'InvalidParameter','param':'size','message':'dummy-private-key'}}).encode()))
+        with patch('sys.argv',args),patch.object(seedream,'credential',return_value='dummy-private-key'),patch.object(seedream.urllib.request,'urlopen',side_effect=failure) as call,patch('sys.stderr',new_callable=StringIO):
+            with self.assertRaises(SystemExit):seedream.main()
+        record=json.loads((out/'generation-log.json').read_text())
+        self.assertEqual(call.call_count,1)
+        self.assertEqual(record['provider_error']['parameter'],'size')
+        self.assertEqual(record['model_calls'],1)
+        self.assertEqual(record['status'],'failed')
+        self.assertNotIn('dummy-private-key',json.dumps(record))
 
     def test_atlas_size_stays_in_model_limits(self):
         for ratio in (1/16,1/3,8/15,1,12/10,12,16):

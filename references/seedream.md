@@ -39,7 +39,7 @@ python3 scripts/build_animation_assets.py \
 
 输出 `source.png`、精确提示词 `prompt.txt` 与 `generation-log.json`。记录请求/返回模型、实际返回尺寸、文件哈希、用量和实际尝试次数，不保存认证头、key、参考图base64或临时签名URL。`generated_pending_review`表示已拿到原图，不代表动画或透明质量通过。
 
-已有生成记录的输出目录不能再次提交，避免误重跑。超时可能已计费，不自动重试；检查旧任务后，自行选择新目录。CLI失败退出非零，源图若未成功下载则不能继续切帧。
+已有生成记录的输出目录不能再次提交，避免误重跑。HTTP失败只保留脱敏的状态码、错误码、参数名与请求编号；区分参数、鉴权、模型开通、内容检查、限流和下载失败，不把所有400归因于权限/余额。未知错误明确标为原因未知，不展示任意上游message、认证头或图片地址。超时可能已计费，不自动重试；检查旧任务后，自行选择新目录。CLI失败退出非零，源图若未成功下载则不能继续切帧。
 
 ## 官方参数边界
 
@@ -49,3 +49,5 @@ python3 scripts/build_animation_assets.py \
 - 默认不透明色键策略，可同时提供身份与布局参考。原生透明模式 `--background transparent` 只支持一张带透明通道的参考图，不能同时传guide；未经实际检查不能声称主体alpha可靠。
 
 参数核对日期：2026-10-03。以[火山方舟官方图片生成API](https://docs.volcengine.com/docs/ark/image-generation-api?lang=zh)和[Seedream官方说明](https://docs.volcengine.com/docs/ark/seedream-4-0-5-0?lang=zh)为准。账号需自行开通模型权限和额度。
+
+错误分类依据：[火山方舟官方错误码](https://docs.volcengine.com/docs/ark/error-codes?lang=zh)。历史任务未保存的错误码不可凭HTTP状态推断，也不为诊断擅自重复付费调用。

@@ -67,6 +67,22 @@ class StudioTests(unittest.TestCase):
         im=Image.new('RGBA',(20,20),'#ff00ff')
         self.assertNotEqual(studio.choose_key(im),'#FF00FF')
 
+
+    def test_http_400_keeps_safe_reason_in_job_without_retry(self):
+        job=studio.create(payload(),submit=False)
+        failure=urllib.error.HTTPError(studio.ARK_URL,400,'Bad Request',{'X-Tt-Logid':'test-request-12345678'},
+            BytesIO(json.dumps({'error':{'code':'InvalidParameter','param':'size',
+            'message':'The parameter size is invalid; dummy-private-key'}}).encode()))
+        with patch.object(studio,'credential',return_value='dummy-private-key'),patch.object(studio.urllib.request,'urlopen',side_effect=failure) as call:
+            studio.run(job['id'])
+        record=studio.read_job(job['id'])
+        self.assertEqual(call.call_count,1)
+        self.assertEqual(record['status'],'failed')
+        self.assertEqual(record['model_calls'],1)
+        self.assertEqual(record['provider_error']['http_status'],400)
+        self.assertIn('字段：size',record['message'])
+        self.assertNotIn('dummy-private-key',json.dumps(record))
+
     def test_provider_timeout_is_one_post(self):
         job=studio.create(payload(),submit=False)
         with patch.object(studio,'credential',return_value='unit-test-key'),patch.object(studio.urllib.request,'urlopen',side_effect=TimeoutError()) as call:

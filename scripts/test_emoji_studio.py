@@ -57,6 +57,19 @@ class StudioTests(unittest.TestCase):
             with self.assertRaises(ValueError):studio.create({**payload(),**change},submit=False)
         with self.assertRaises(ValueError):studio.folder('../x')
 
+    def test_request_id_cannot_reuse_job_with_different_content(self):
+        one=studio.create(payload(),submit=False)
+        changed={**payload(),'expressions':[{'name':'谢谢','description':'合起双手点头'}]}
+        for legacy in (False,True):
+            if legacy:studio.update(one['id'],request_fingerprint=None)
+            with patch.object(studio.POOL,'submit') as submit:
+                with self.assertRaisesRegex(ValueError,'请求编号已用于不同内容'):
+                    studio.create(changed)
+            submit.assert_not_called()
+            same=studio.create(payload(),submit=False)
+            self.assertEqual(same['id'],one['id'])
+        self.assertEqual(len(studio.jobs()),1)
+
     def test_ten_expressions_accepted_and_eleven_rejected(self):
         data=payload()
         data['expressions']=[{'name':f'表情{i+1}','description':'微笑眨眼再挥手'} for i in range(10)]

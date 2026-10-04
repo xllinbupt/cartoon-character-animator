@@ -167,6 +167,13 @@ def create(payload, submit=True, retry_of=None):
         records = jobs()
         for existing in records:
             if existing.get('request_id') == request_id:
+                previous = existing.get('request_fingerprint')
+                if previous is None:
+                    original = folder(existing['id']) / 'reference-original'
+                    if original.is_file():
+                        previous = fingerprint(original.read_bytes(), existing['mode'], existing['expressions'], existing.get('identity', ''), existing.get('outline', False))
+                if previous != signature:
+                    raise ValueError('请求编号已用于不同内容，请刷新页面后重新提交；本次未生图，也未复用旧任务')
                 return existing
         for existing in records:
             if existing['status'] in ACTIVE and existing.get('request_fingerprint') == signature and retry_of is None:
